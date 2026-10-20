@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "author": "EVA1 - ESP-NOW (layout mejorado)",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp1", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-dht22", "id": "dht1", "top": -110, "left": 40, "attrs": { "temperature": "28", "humidity": "55" } },
+    { "type": "wokwi-led", "id": "ledVent", "top": 260, "left": 40, "attrs": { "color": "red" } },
+    { "type": "wokwi-resistor", "id": "r1", "top": 310, "left": 20, "attrs": { "value": "220" } },
+
+    { "type": "board-esp32-devkit-c-v4", "id": "esp2", "top": 0, "left": 500, "attrs": {} },
+    { "type": "wokwi-led", "id": "ledFan",   "top": 260, "left": 540, "attrs": { "color": "green" } },
+    { "type": "wokwi-led", "id": "ledAlert", "top": 320, "left": 540, "attrs": { "color": "red" } }
+  ],
+  "connections": [
+    [ "esp1:3V3",    "dht1:VCC",  "red",    [] ],
+    [ "esp1:GND.1",  "dht1:GND",  "black",  [] ],
+    [ "esp1:GPIO4",  "dht1:SDA",  "blue",   [] ],
+    [ "esp1:GPIO5",  "ledVent:A", "orange", [] ],
+    [ "ledVent:C",   "r1:1",      "gray",   [] ],
+    [ "r1:2",        "esp1:GND.2","black",  [] ],
+
+    [ "esp2:GPIO25", "ledFan:A",   "green",  [] ],
+    [ "ledFan:C",    "esp2:GND.1", "black",  [] ],
+    [ "esp2:GPIO26", "ledAlert:A", "purple", [] ],
+    [ "ledAlert:C",  "esp2:GND.2", "black",  [] ]
+  ],
+  "dependencies": {}
+}
