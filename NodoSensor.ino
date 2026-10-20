@@ -1,9 +1,22 @@
 /*
- * NODO SENSOR - ESP32
- * - Lee DHT22 cada 2s sin bloquear (millis)
- * - Activa ventilador (relé) si T > umbral en modo AUTO
- * - Envía telemetría por Bluetooth Serial (BluetoothSerial)
- * - Recibe y valida comandos, confirma con ACK
+ * ============================================================
+ *  NODO SENSOR - ESP32
+ *  Sistema: Monitoreo Temp/Humedad con activación de ventilador
+ * ============================================================
+ *  - Lee DHT22 cada 2s SIN usar delay() (millis)
+ *  - Activa ventilador (relé) si T > umbral en modo AUTO
+ *  - Envía telemetría JSON por Bluetooth Serial
+ *  - Recibe comandos, los valida y responde con ACK
+ *
+ *  Hardware:
+ *   - DHT22  → GPIO 4
+ *   - Relé   → GPIO 5
+ *
+ *  Librerías necesarias:
+ *   - BluetoothSerial (incluida en el core ESP32)
+ *   - DHT sensor library (Adafruit)
+ *   - Adafruit Unified Sensor
+ * ============================================================
  */
 
 #include "BluetoothSerial.h"
@@ -23,16 +36,18 @@ float temperatura = 0.0;
 float humedad     = 0.0;
 float umbral      = 30.0;      // °C
 bool  ventilador  = false;
-bool  modoAuto    = true;      // true = automático, false = manual
+bool  modoAuto    = true;      // true = AUTO, false = MANUAL
 
-// ---------- Temporización (millis) ----------
+// ---------- Temporización NO bloqueante ----------
 const unsigned long INTERVALO_LECTURA = 2000;   // 2 s
 unsigned long ultimaLectura = 0;
 
-// ---------- Buffer para comandos ----------
+// ---------- Buffer de recepción ----------
 String bufferRX = "";
 
 // ---------- Utilidades ----------
+
+// Aplica el estado al relé y actualiza la variable
 void aplicarVentilador(bool estado) {
   ventilador = estado;
   digitalWrite(RELAY_PIN, estado ? HIGH : LOW);
@@ -40,7 +55,7 @@ void aplicarVentilador(bool estado) {
   Serial.println(estado ? "ON" : "OFF");
 }
 
-// Genera y envía telemetría JSON
+// Envía telemetría en formato JSON
 void enviarTelemetria() {
   String msg = "{";
   msg += "\"T\":"   + String(temperatura, 1) + ",";
@@ -53,7 +68,7 @@ void enviarTelemetria() {
   Serial.println("TX: " + msg);
 }
 
-// Respuesta de confirmación
+// Envía confirmación de comando
 void enviarACK(String cmd, float val, bool ok) {
   String msg = "{\"ACK\":\"" + cmd + "\",";
   msg += "\"VAL\":" + String(val, 1) + ",";
@@ -62,12 +77,12 @@ void enviarACK(String cmd, float val, bool ok) {
   Serial.println("TX ACK: " + msg);
 }
 
-// ---------- Procesamiento de comandos ----------
+// ---------- Procesamiento de comandos recibidos ----------
 void procesarComando(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
 
-  // SET_THRESHOLD
+  // --- SET_THRESHOLD ---
   if (cmd.startsWith("{\"CMD\":\"SET_THRESHOLD\"")) {
     int idx = cmd.indexOf("\"VAL\":");
     if (idx < 0) { enviarACK("SET_THRESHOLD", umbral, false); return; }
@@ -83,7 +98,7 @@ void procesarComando(String cmd) {
     return;
   }
 
-  // FAN_ON
+  // --- FAN_ON ---
   if (cmd.indexOf("\"CMD\":\"FAN_ON\"") >= 0) {
     modoAuto = false;
     aplicarVentilador(true);
@@ -91,7 +106,7 @@ void procesarComando(String cmd) {
     return;
   }
 
-  // FAN_OFF
+  // --- FAN_OFF ---
   if (cmd.indexOf("\"CMD\":\"FAN_OFF\"") >= 0) {
     modoAuto = false;
     aplicarVentilador(false);
@@ -99,7 +114,7 @@ void procesarComando(String cmd) {
     return;
   }
 
-  // MODE (A/M)
+  // --- MODE (A / M) ---
   if (cmd.indexOf("\"CMD\":\"MODE\"") >= 0) {
     bool ok = false;
     if (cmd.indexOf("\"VAL\":\"A\"") >= 0) { modoAuto = true;  ok = true; }
@@ -108,27 +123,28 @@ void procesarComando(String cmd) {
     return;
   }
 
-  // STATUS
+  // --- STATUS ---
   if (cmd.indexOf("\"CMD\":\"STATUS\"") >= 0) {
     enviarTelemetria();
     return;
   }
 
-  // Comando desconocido
+  // --- Desconocido ---
   enviarACK("UNKNOWN", 0, false);
 }
 
 // ---------- Setup ----------
 void setup() {
   Serial.begin(115200);
-  Serial.println("Nodo Sensor iniciando...");
+  Serial.println("=== NODO SENSOR iniciando ===");
 
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);   // Ventilador apagado al inicio
+  digitalWrite(RELAY_PIN, LOW);   // ventilador apagado al inicio
 
   dht.begin();
-  SerialBT.begin("NodoSensor_Temp");  // Nombre Bluetooth visible
+  SerialBT.begin("NodoSensor_Temp");
   Serial.println("Bluetooth listo: NodoSensor_Temp");
+  Serial.println("Esperando conexión del Nodo Control...");
 }
 
 // ---------- Loop ----------
@@ -140,23 +156,24 @@ void loop() {
 
     float t = dht.readTemperature();
     float h = dht.readHumidity();
+
     if (!isnan(t) && !isnan(h)) {
       temperatura = t;
       humedad     = h;
 
-      // Lógica AUTO: si supera umbral → activar; con histéresis 1°C para evitar parpadeo
+      // Lógica AUTO con histéresis de 1 °C (evita parpadeo del relé)
       if (modoAuto) {
-        if (!ventilador && temperatura > umbral)       aplicarVentilador(true);
-        if ( ventilador && temperatura < umbral - 1.0) aplicarVentilador(false);
+        if (!ventilador && temperatura > umbral)        aplicarVentilador(true);
+        if ( ventilador && temperatura < umbral - 1.0)  aplicarVentilador(false);
       }
     } else {
-      Serial.println("Error leyendo DHT22");
+      Serial.println("ERROR: lectura DHT22 inválida");
     }
 
     enviarTelemetria();
   }
 
-  // 2) Recepción de comandos por Bluetooth
+  // 2) Recepción de comandos Bluetooth (carácter a carácter)
   while (SerialBT.available()) {
     char c = SerialBT.read();
     if (c == '\n' || c == '\r') {
@@ -165,7 +182,7 @@ void loop() {
         bufferRX = "";
       }
     } else {
-      if (bufferRX.length() < 200) bufferRX += c;  // evitar overflow
+      if (bufferRX.length() < 200) bufferRX += c;   // anti-overflow
     }
   }
 }
