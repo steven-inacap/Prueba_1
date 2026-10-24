@@ -8,6 +8,30 @@ https://drive.google.com/file/d/1ULmcg1ZzhdTKfS06avHNpIzTz1EMrJTt/view?usp=shari
 
 Mensaje Serial Sensor:
 
+=== NODO SENSOR iniciando ===
+E (10585) task_wdt: Task watchdog got triggered. The following tasks/users did not reset the watchdog in time:
+E (10585) task_wdt:  - IDLE0 (CPU 0)
+E (10585) task_wdt: Tasks currently running:
+E (10585) task_wdt: CPU 0: btController
+E (10585) task_wdt: CPU 1: IDLE1
+E (10585) task_wdt: Aborting.
+E (10585) task_wdt: Print CPU 0 (current core) backtrace
+
+Backtrace: 0x4003c9fd:0x3ffd2ac0 0x4005516e:0x3ffd2ae0 0x40179b86:0x3ffd2b00 0x4016405b:0x3ffd2b40 0x40164593:0x3ffd2b60 0x40093f99:0x3ffd2b90
+ELF file SHA256: a4f176e52
+
+Rebooting...
+ets Jul 29 2019 12:21:46
+
+rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:1156
+load:0x40078000,len:11456
+ho 0 tail 12 room 4
+load:0x40080400,len:2972
+entry 0x400805dc
 
 Mensaje Serial Control:
 
