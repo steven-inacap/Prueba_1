@@ -1,6 +1,41 @@
 Integrante: Steven Stock
+
 Caso 1: Ventilador
-Diagrama: https://drive.google.com/file/d/1ULmcg1ZzhdTKfS06avHNpIzTz1EMrJTt/view?usp=sharing
+
+Diagrama: 
+
+https://drive.google.com/file/d/1ULmcg1ZzhdTKfS06avHNpIzTz1EMrJTt/view?usp=sharing
+
+Mensaje Serial Sensor:
+
+
+Mensaje Serial Control:
+
+=== NODO CONTROL iniciando ===
+E (10585) task_wdt: Task watchdog got triggered. The following tasks/users did not reset the watchdog in time:
+E (10585) task_wdt:  - IDLE0 (CPU 0)
+E (10585) task_wdt: Tasks currently running:
+E (10585) task_wdt: CPU 0: btController
+E (10585) task_wdt: CPU 1: IDLE1
+E (10585) task_wdt: Aborting.
+E (10585) task_wdt: Print CPU 0 (current core) backtrace
+
+Backtrace: 0x4003c9fd:0x3ffd2b60 0x4005516e:0x3ffd2b80 0x40179dba:0x3ffd2ba0 0x4016428f:0x3ffd2be0 0x401647c7:0x3ffd2c00 0x40093fb1:0x3ffd2c30
+
+ELF file SHA256: b280dcef1
+
+Rebooting...
+ets Jul 29 2019 12:21:46
+
+rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:1156
+load:0x40078000,len:11456
+ho 0 tail 12 room 4
+load:0x40080400,len:2972
+entry 0x400805dc
 
 # 1: Brechas de Seguridad:
 
