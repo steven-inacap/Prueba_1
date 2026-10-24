@@ -2,7 +2,44 @@ Integrante: Steven Stock
 
 Caso 1: Ventilador
 
-Diagrama: 
+Tabla:
+
+# Tabla de componentes del sistema (Nodo Sensor + Nodo Control)
+
+## Nodo Sensor (ESP32 esclavo, mide y actúa)
+
+| # | Componente | Voltaje | Interfaz / Protocolo | Rango / Alcance | ¿Por qué sirve en este caso? |
+|---|---|---|---|---|---|
+| 1 | **ESP32 DevKit (WROOM-32)** | 3.3 V lógica · 5 V entrada USB/VIN | Wi-Fi + **Bluetooth Classic SPP** + UART + GPIO | BT Classic ~10 m (Clase 2, interior) | Es el cerebro del nodo: lee el DHT22, controla el relé y habla con el maestro por SPP. Tiene WDT por hardware (SEC-B9) y suficientes GPIO. |
+| 2 | **Sensor DHT22 (AM2302)** | 3.3 – 5 V (alimentado a 3.3 V) | **Bus one-wire propio** (single-wire, no es Dallas 1-Wire) en GPIO4 | **Temp: −40 a +80 °C (±0.5 °C)** · **Humedad: 0–100 %RH (±2–5 %)** · muestreo ≥2 s | Mide temperatura y humedad del ambiente, que son las variables que disparan el ventilador. El intervalo de lectura del código (2 s) coincide con su tiempo mínimo de muestreo. |
+| 3 | **Módulo relé 1 canal (optoacoplado)** | Bobina 5 V · Contacto conmuta 250 VAC / 10 A (típico) | **GPIO digital** (GPIO5, activo HIGH en el código) | Conmuta cargas de hasta ~2.2 kW a 220 VAC | Actúa como interruptor aislado del ventilador. La optoacoplación protege al ESP32 de picos inductivos del motor. Fail-safe: arranca en LOW (OFF). |
+| 4 | **Ventilador (carga)** | 220 VAC (o 12 VDC según modelo) | **Controlado por contacto seco del relé** | Flujo según modelo (típ. 100–300 m³/h) | Es el actuador final: enfría el ambiente cuando `T > umbral`. En modo AUTO el sensor lo enciende/apaga solo. |
+| 5 | **Fuente 5 V / 1 A (USB o HLK-PM01)** | 100–240 VAC → 5 VDC | — | 1 A continuo | Alimenta ESP32 (vía VIN) y bobina del relé. Independiente de la carga del ventilador para evitar caídas de tensión. |
+| 6 | **Pulsador/Botón de reset** (opcional) | 3.3 V | GPIO con pull-up interno | — | Reinicio manual sin desenchufar; útil si el WDT entra en panic y se queda reiniciando. |
+
+---
+
+## Nodo Control (ESP32 maestro, HMI y monitoreo)
+
+| # | Componente | Voltaje | Interfaz / Protocolo | Rango / Alcance | ¿Por qué sirve en este caso? |
+|---|---|---|---|---|---|
+| 1 | **ESP32 DevKit (WROOM-32)** | 3.3 V lógica · 5 V entrada | **Bluetooth Classic SPP maestro** + UART USB | BT ~10 m (Clase 2) | Es el maestro: se conecta al sensor por nombre (`Nodo_Seguridad`), envía comandos con token (SEC-C2) y recibe telemetría. También sirve de puente USB→BT para el operador. |
+| 2 | **LED verde — ventilador** | 2 V @ 10 mA (con R 220 Ω a 3.3 V) | **GPIO digital** (GPIO25) | — | Indicación visual local del estado del relé (ON/OFF) que reporta la telemetría. Permite verificar sin mirar el monitor serie. |
+| 3 | **LED rojo — alerta** | 2 V @ 10 mA (con R 220 Ω a 3.3 V) | **GPIO digital** (GPIO26) | — | Se enciende cuando `T > umbral`. Es la alarma visual del operador aunque el ventilador esté en manual. |
+| 4 | **PC / monitor serie (USB)** | 5 V USB | **UART USB-CDC** a 115200 baudios | Cable USB (1–2 m) | Interfaz de operador: recibe comandos `SET n`, `ON`, `OFF`, `AUTO`, `MANUAL`, `STATUS`, `HELP` y muestra telemetría formateada. |
+| 5 | **Fuente 5 V / 1 A** | 100–240 VAC → 5 VDC | — | 1 A | Alimenta el nodo control. Consumo bajo (solo LEDs y BT), pero se sobredimensiona por picos de TX BT. |
+
+---
+
+## Enlace de comunicación (transversal a ambos nodos)
+
+| Componente | Voltaje | Interfaz / Protocolo | Rango / Alcance | ¿Por qué sirve? |
+|---|---|---|---|---|
+| **Bluetooth Classic SPP** (integrado en ambos ESP32) | 3.3 V (radio interna) | **RF 2.4 GHz · perfil SPP (Serial Port Profile)** con PIN `472913` | **~10 m** en interiores, ~30 m en línea de vista | Es el canal máquina-a-máquina. SPP emula un puerto serie: el código usa `SerialBT.println()` igual que un UART, pero sin cables. El PIN (SEC-B1/SEC-C1) evita emparejamientos no autorizados. |
+| **Token compartido `OT-7f3a9c2e`** (software, no hardware) | — | **Campo `"TK"` dentro del JSON** | — | Autentica cada comando a nivel de aplicación (SEC-B1/B2). Aunque alguien empareje por BT, sin el token los comandos se rechazan con `UNAUTH`. |
+| **JSON como formato de trama** (software) | — | **Texto ASCII sobre SPP** | Trama ≤160 bytes (`RX_MAX`) | Formato legible y parseable de forma estricta (SEC-B3/C3). Permite validar rangos (SEC-B4/C4) y llevar ACK con timeout (SEC-C9). |
+
+Diagrama Conexiones: 
 
 https://drive.google.com/file/d/1ULmcg1ZzhdTKfS06avHNpIzTz1EMrJTt/view?usp=sharing
 
