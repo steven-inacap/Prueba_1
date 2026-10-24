@@ -1,222 +1,228 @@
 /*
  * ============================================================
- *  NODO CONTROL - ESP32 (maestro Bluetooth)  (VERSIÓN SEGURA)
+ *  NODO SENSOR - ESP32  (VERSIÓN SEGURA)
  * ============================================================
- *  Medidas aplicadas — referenciadas SEC-Cxx
+ *  Medidas de seguridad aplicadas (referenciadas en comentarios SEC-xx)
  * ============================================================
  */
 
 #include "BluetoothSerial.h"
+#include "DHT.h"
+#include <esp_task_wdt.h>
+
+// ---------- Pines ----------
+#define DHTPIN      4
+#define DHTTYPE     DHT22
+#define RELAY_PIN   5
+
+// ---------- Límites de seguridad ----------
+static const float  UMBRAL_MIN       = 10.0f;
+static const float  UMBRAL_MAX       = 60.0f;
+static const size_t RX_MAX           = 160;      // SEC-B10: buffer acotado
+static const uint32_t CMD_MIN_INTERVAL_MS = 100; // SEC-B5: rate limit
+static const uint32_t BT_TIMEOUT_MS  = 30000;    // SEC-B6: timeout de sesión
+static const uint32_t FAILSAFE_MS    = 10000;    // SEC-B9: fail-safe ventilador
+
+// SEC-B1: token compartido (en producción: NVS + rotación)
+static const char* SHARED_TOKEN = "OT-7f3a9c2e";
 
 BluetoothSerial SerialBT;
+DHT dht(DHTPIN, DHTTYPE);
 
-#define LED_FAN     25
-#define LED_ALERTA  26
+float temperatura = 0.0f;
+float humedad     = 0.0f;
+float umbral      = 30.0f;
+bool  ventilador  = false;
+bool  modoAuto    = true;
 
-const char* NOMBRE_SENSOR = "NodoSensor_Temp";
-const char* SHARED_TOKEN  = "OT-7f3a9c2e";   // SEC-C2: mismo token que el sensor
+const unsigned long INTERVALO_LECTURA = 2000;
+unsigned long ultimaLectura  = 0;
+unsigned long ultimoComando  = 0;
+unsigned long ultimaConexion = 0;
 
-// SEC-C3/C4: límites de telemetría válidos
-static const float T_MIN = -20.0f, T_MAX = 80.0f;
-static const float H_MIN =   0.0f, H_MAX = 100.0f;
-static const size_t RX_MAX = 160;
-static const uint32_t ACK_TIMEOUT_MS = 2000; // SEC-C9
+String bufferRX = "";
 
-bool conectado = false;
-float temperatura = 0.0f, humedad = 0.0f, umbral = 0.0f;
-int   ventilador = 0;
-String modo = "?";
+// ---------- Utilidades ----------
+void aplicarVentilador(bool estado) {
+  ventilador = estado;
+  digitalWrite(RELAY_PIN, estado ? HIGH : LOW);
+  // SEC-B8: log de seguridad con timestamp
+  Serial.printf("[SEC][%lu] RELAY=%s\n", millis(), estado ? "ON" : "OFF");
+}
 
-String bufferUSB = "";
-String bufferBT  = "";
+void enviarTelemetria() {
+  String msg = "{";
+  msg += "\"T\":"   + String(temperatura, 1) + ",";
+  msg += "\"H\":"   + String(humedad, 1)     + ",";
+  msg += "\"V\":"   + String(ventilador ? 1 : 0) + ",";
+  msg += "\"U\":"   + String(umbral, 1)      + ",";
+  msg += "\"M\":\"" + String(modoAuto ? "A" : "M") + "\"";
+  msg += "}";
+  SerialBT.println(msg);
+}
 
-// SEC-C9: control de ACK pendiente
-uint32_t ultimoEnvioComando = 0;
-String   comandoPendiente   = "";
+void enviarACK(const char* cmd, float val, bool ok) {
+  String msg = "{\"ACK\":\"" + String(cmd) + "\",";
+  msg += "\"VAL\":" + String(val, 1) + ",";
+  msg += "\"OK\":" + String(ok ? 1 : 0) + "}";
+  SerialBT.println(msg);
+  Serial.printf("[SEC] ACK %s ok=%d\n", cmd, ok);
+}
 
-// ---------- Parsers estrictos (SEC-C3) ----------
-bool extraerFloatSafe(const String& s, const String& clave, float& out) {
-  int i = s.indexOf("\"" + clave + "\":");
-  if (i < 0) return false;
-  int ini = i + clave.length() + 3;
-  int fin = ini;
-  while (fin < (int)s.length() && s[fin] != ',' && s[fin] != '}') fin++;
-  String v = s.substring(ini, fin);
-  if (v.length() == 0 || v.length() > 8) return false;
-  for (size_t k = 0; k < v.length(); ++k) {
-    char c = v[k];
+// SEC-B3: parser estricto de entero/flotante con validación NaN
+bool parseFloatStrict(const String& s, float& out) {
+  if (s.length() == 0 || s.length() > 8) return false;
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
     if (!(isdigit(c) || c == '.' || c == '-' || c == '+')) return false;
   }
-  out = v.toFloat();
+  out = s.toFloat();
   return !isnan(out) && isfinite(out);
 }
 
-String extraerStringSafe(const String& s, const String& clave) {
-  int i = s.indexOf("\"" + clave + "\":\"");
-  if (i < 0) return "";
-  int ini = i + clave.length() + 4;
-  int fin = s.indexOf('"', ini);
-  if (fin < 0) return "";
-  return s.substring(ini, fin);
+// SEC-B1/B2: verifica token antes de ejecutar cualquier comando
+bool autorizado(const String& cmd) {
+  int t = cmd.indexOf("\"TK\":\"");
+  if (t < 0) return false;
+  int ini = t + 6;
+  int fin = cmd.indexOf('"', ini);
+  if (fin < 0) return false;
+  String tk = cmd.substring(ini, fin);
+  // comparación en tiempo constante aproximado
+  if (tk.length() != strlen(SHARED_TOKEN)) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < tk.length(); ++i)
+    diff |= (uint8_t)(tk[i] ^ SHARED_TOKEN[i]);
+  return diff == 0;
 }
 
-// ---------- Procesamiento de telemetría ----------
-void procesarTelemetria(const String& msg) {
-  if (msg.indexOf("\"T\":") < 0) return;
+// SEC-B3/B4: parser de comando con validación estricta
+void procesarComando(String cmd) {
+  cmd.trim();
+  if (cmd.length() == 0 || cmd.length() > RX_MAX) return;
 
-  float t, h, u;
-  if (!extraerFloatSafe(msg, "T", t) ||
-      !extraerFloatSafe(msg, "H", h) ||
-      !extraerFloatSafe(msg, "U", u)) {
-    Serial.println("[SEC] telemetría inválida: descartada");
+  // SEC-B5: rate limiting
+  unsigned long now = millis();
+  if (now - ultimoComando < CMD_MIN_INTERVAL_MS) {
+    Serial.println("[SEC] rate-limit: comando descartado");
     return;
   }
-  // SEC-C4: validación de rangos
-  if (t < T_MIN || t > T_MAX || h < H_MIN || h > H_MAX ||
-      u < 10.0f || u > 60.0f) {
-    Serial.println("[SEC] telemetría fuera de rango: descartada");
+  ultimoComando = now;
+
+  // SEC-B1/B2: autorización obligatoria
+  if (!autorizado(cmd)) {
+    Serial.println("[SEC] comando NO autorizado -> rechazado");
+    enviarACK("UNAUTH", 0, false);
     return;
   }
-  temperatura = t; humedad = h; umbral = u;
-  float v; ventilador = extraerFloatSafe(msg, "V", v) ? (int)v : 0;
-  modo = extraerStringSafe(msg, "M");
 
-  Serial.println("=========== TELEMETRÍA ===========");
-  Serial.printf(" Temperatura : %.1f C\n Humedad     : %.1f %%\n", temperatura, humedad);
-  Serial.printf(" Umbral      : %.1f C\n Ventilador  : %s\n",
-                umbral, ventilador ? "ON" : "OFF");
-  Serial.printf(" Modo        : %s\n", modo == "A" ? "AUTOMATICO" : "MANUAL");
-  Serial.println("==================================");
-
-  digitalWrite(LED_FAN,    ventilador ? HIGH : LOW);
-  digitalWrite(LED_ALERTA, (temperatura > umbral) ? HIGH : LOW);
-}
-
-void procesarACK(const String& msg) {
-  String cmd = extraerStringSafe(msg, "ACK");
-  float okf;
-  int ok = extraerFloatSafe(msg, "OK", okf) ? (int)okf : 0;
-  Serial.printf("ACK [%s] -> %s\n", cmd.c_str(), ok ? "ACEPTADO" : "RECHAZADO");
-  // SEC-C9: limpiar pendiente si coincide
-  if (cmd == comandoPendiente) comandoPendiente = "";
-}
-
-// ---------- Envío con token (SEC-C2) ----------
-void enviarComando(const String& payload) {
-  // Inyecta el token en el payload JSON
-  String conToken = payload;
-  int cierre = conToken.lastIndexOf('}');
-  if (cierre < 0) return;
-  conToken = conToken.substring(0, cierre) +
-             ",\"TK\":\"" + SHARED_TOKEN + "\"}";
-  SerialBT.println(conToken);
-  Serial.println("TX -> " + conToken);
-  ultimoEnvioComando = millis();
-  // Guarda el nombre de comando para timeout de ACK
-  int c = payload.indexOf("\"CMD\":\"");
-  if (c >= 0) {
-    int f = payload.indexOf('"', c + 7);
-    comandoPendiente = payload.substring(c + 7, f);
-  }
-}
-
-// ---------- Entrada de usuario (SEC-C6) ----------
-void interpretarEntradaUsuario(String linea) {
-  linea.trim();
-  if (linea.length() == 0 || linea.length() > 32) return; // SEC-C10
-  String upper = linea; upper.toUpperCase();
-
-  if (upper.startsWith("SET ")) {
-    float v;
-    // SEC-C10: validación estricta del argumento
-    if (!extraerFloatSafe("{\"V\":" + upper.substring(4) + "}", "V", v) ||
-        v < 10.0f || v > 60.0f) {
-      Serial.println("[SEC] SET inválido (rango 10-60)");
+  // --- SET_THRESHOLD ---
+  if (cmd.startsWith("{\"CMD\":\"SET_THRESHOLD\"")) {
+    int idx = cmd.indexOf("\"VAL\":");
+    if (idx < 0) { enviarACK("SET_THRESHOLD", umbral, false); return; }
+    int fin = cmd.indexOf(',', idx);
+    if (fin < 0) fin = cmd.indexOf('}', idx);
+    if (fin < 0) { enviarACK("SET_THRESHOLD", umbral, false); return; }
+    float nuevo;
+    if (!parseFloatStrict(cmd.substring(idx + 6, fin), nuevo) ||
+        nuevo < UMBRAL_MIN || nuevo > UMBRAL_MAX) {
+      enviarACK("SET_THRESHOLD", umbral, false);
       return;
     }
-    enviarComando("{\"CMD\":\"SET_THRESHOLD\",\"VAL\":" + String(v, 1) + "}");
+    umbral = nuevo;
+    enviarACK("SET_THRESHOLD", umbral, true);
+    return;
   }
-  else if (upper == "ON")     enviarComando("{\"CMD\":\"FAN_ON\"}");
-  else if (upper == "OFF")    enviarComando("{\"CMD\":\"FAN_OFF\"}");
-  else if (upper == "AUTO")   enviarComando("{\"CMD\":\"MODE\",\"VAL\":\"A\"}");
-  else if (upper == "MANUAL") enviarComando("{\"CMD\":\"MODE\",\"VAL\":\"M\"}");
-  else if (upper == "STATUS") enviarComando("{\"CMD\":\"STATUS\"}");
-  else if (upper == "HELP") {
-    Serial.println("SET <n> | ON | OFF | AUTO | MANUAL | STATUS | HELP");
-  } else Serial.println("Comando no reconocido.");
+
+  if (cmd.indexOf("\"CMD\":\"FAN_ON\"")  >= 0) {
+    modoAuto = false; aplicarVentilador(true);
+    enviarACK("FAN_ON", 1, true); return;
+  }
+  if (cmd.indexOf("\"CMD\":\"FAN_OFF\"") >= 0) {
+    modoAuto = false; aplicarVentilador(false);
+    enviarACK("FAN_OFF", 0, true); return;
+  }
+  if (cmd.indexOf("\"CMD\":\"MODE\"") >= 0) {
+    bool ok = false;
+    if (cmd.indexOf("\"VAL\":\"A\"") >= 0) { modoAuto = true;  ok = true; }
+    if (cmd.indexOf("\"VAL\":\"M\"") >= 0) { modoAuto = false; ok = true; }
+    enviarACK("MODE", modoAuto ? 1 : 0, ok); return;
+  }
+  if (cmd.indexOf("\"CMD\":\"STATUS\"") >= 0) { enviarTelemetria(); return; }
+
+  enviarACK("UNKNOWN", 0, false);
 }
 
 // ---------- Setup ----------
 void setup() {
   Serial.begin(115200);
-  pinMode(LED_FAN, OUTPUT);
-  pinMode(LED_ALERTA, OUTPUT);
-  digitalWrite(LED_FAN, LOW);
-  digitalWrite(LED_ALERTA, LOW);
+  // SEC-B9: watchdog para recuperación de fallos
+  esp_task_wdt_init(15, true);
+  esp_task_wdt_add(NULL);
 
-  SerialBT.begin("NodoControl_Temp", true);
-  // SEC-C1: PIN de emparejamiento para verificar el peer
-  SerialBT.setPin("472913", 6);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);   // fail-safe: relé apagado al boot
 
-  Serial.printf("Buscando sensor '%s'...\n", NOMBRE_SENSOR);
-  if (SerialBT.connect(NOMBRE_SENSOR)) {
-    conectado = true;
-    Serial.println("[SEC] Conectado al sensor verificado.");
-  } else {
-    Serial.println("No conectado; reintento en loop.");
-  }
+  dht.begin();
+  // SEC-B1: emparejamiento con PIN (Secure Simple Pairing, "DisplayOnly")
+  SerialBT.begin("NodoSensor_Temp");
+  SerialBT.setPin("472913", 6);   // PIN numérico, no expuesto en logs
+  Serial.println("[SEC] BT listo (PIN protegido)");
+  ultimaConexion = millis();
 }
 
 // ---------- Loop ----------
 void loop() {
-  // SEC-C5: reconexión NO bloqueante (millis)
-  static uint32_t ultimoIntento = 0;
-  if (!conectado) {
-    if (millis() - ultimoIntento > 2000) {
-      ultimoIntento = millis();
-      if (SerialBT.connect(NOMBRE_SENSOR)) {
-        conectado = true;
-        Serial.println("[SEC] Reconectado.");
+  esp_task_wdt_reset();   // SEC-B9
+
+  unsigned long ahora = millis();
+
+  // SEC-B6: timeout de sesión BT
+  if (!SerialBT.hasClient() && (ahora - ultimaConexion > BT_TIMEOUT_MS)) {
+    Serial.println("[SEC] BT sin cliente: mantenido en estado seguro");
+    if (ventilador) aplicarVentilador(false);
+    bufferRX = "";
+    ultimaConexion = ahora;
+  }
+  if (SerialBT.hasClient()) ultimaConexion = ahora;
+
+  // Lectura periódica no bloqueante
+  if (ahora - ultimaLectura >= INTERVALO_LECTURA) {
+    ultimaLectura = ahora;
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if (!isnan(t) && !isnan(h)) {
+      temperatura = t; humedad = h;
+      if (modoAuto) {
+        if (!ventilador && temperatura > umbral)       aplicarVentilador(true);
+        if ( ventilador && temperatura < umbral - 1.0f) aplicarVentilador(false);
       }
+    } else {
+      Serial.println("[SEC] lectura DHT22 inválida");
     }
+    enviarTelemetria();
   }
 
-  // SEC-C9: timeout de ACK
-  if (comandoPendiente.length() > 0 &&
-      millis() - ultimoEnvioComando > ACK_TIMEOUT_MS) {
-    Serial.printf("[SEC] ACK perdido para %s\n", comandoPendiente.c_str());
-    comandoPendiente = "";
+  // SEC-B9: fail-safe — si en modo AUTO no hay cliente, apagar ventilador
+  if (modoAuto && !SerialBT.hasClient() &&
+      (ahora - ultimaConexion > FAILSAFE_MS) && ventilador) {
+    Serial.println("[SEC] fail-safe: ventilador apagado (sin enlace)");
+    aplicarVentilador(false);
   }
 
-  // Datos entrantes del sensor
+  // Recepción de comandos (buffer acotado)
   while (SerialBT.available()) {
     char c = SerialBT.read();
     if (c == '\n' || c == '\r') {
-      if (bufferBT.length() > 0) {
-        if (bufferBT.indexOf("\"ACK\":") >= 0) procesarACK(bufferBT);
-        else                                    procesarTelemetria(bufferBT);
-        bufferBT = "";
+      if (bufferRX.length() > 0) {
+        procesarComando(bufferRX);
+        bufferRX = "";
       }
-    } else if (bufferBT.length() < RX_MAX) {   // SEC-C7
-      bufferBT += c;
+    } else if (bufferRX.length() < RX_MAX) {   // SEC-B10
+      bufferRX += c;
     } else {
-      Serial.println("[SEC] BT RX overflow");
-      bufferBT = "";
-    }
-  }
-
-  // Comandos del usuario por USB
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (bufferUSB.length() > 0) {
-        interpretarEntradaUsuario(bufferUSB);
-        bufferUSB = "";
-      }
-    } else if (bufferUSB.length() < 32) {      // SEC-C10
-      bufferUSB += c;
-    } else {
-      bufferUSB = "";   // descarta línea demasiado larga
+      Serial.println("[SEC] RX overflow: buffer descartado");
+      bufferRX = "";
     }
   }
 }
